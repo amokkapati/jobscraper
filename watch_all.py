@@ -4,7 +4,6 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 from pathlib import Path
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 TZ = ZoneInfo("America/Los_Angeles")
 
@@ -61,74 +60,22 @@ def send_email(subject: str, body: str):
         server.login(smtp_user, smtp_pass)
         server.sendmail(smtp_user, [to_email], msg.as_string())
 
-# ---------- scraping ----------
-def fetch_uber(page) -> list[dict]:
-    page.goto(UBER_URL, wait_until="domcontentloaded", timeout=60_000)
-
-    # Wait for listings to render
-    selectors = [
-        "a[href*='/careers/list/']",
-        "[data-baseweb='link'] a[href*='/careers/list/']",
-    ]
-    hydrated = False
-    for sel in selectors:
-        try:
-            page.wait_for_selector(sel, timeout=15_000)
-            hydrated = True
-            break
-        except PWTimeout:
-            continue
-    if not hydrated:
-        page.wait_for_timeout(1500)
-
-    # Scroll / click Load more
-    for _ in range(24):
-        before = page.locator("a[href*='/careers/list/']").count()
-        page.keyboard.press("End")
-        page.wait_for_timeout(700)
-        load_more = page.locator("button:has-text('Load more')")
-        if load_more.count() > 0:
-            try:
-                load_more.first.click(timeout=3000)
-                page.wait_for_timeout(1200)
-            except Exception:
-                pass
-        after = page.locator("a[href*='/careers/list/']").count()
-        if after <= before:
-            break
-
-    anchors = page.locator("a[href*='/careers/list/']").all()
-    jobs, seen_urls = [], set()
-    for a in anchors:
-        href = a.get_attribute("href") or ""
-        title = (a.inner_text() or "").strip()
-        if not title or "/careers/list/" not in href:
-            continue
-        if href.startswith("/"):
-            href = "https://www.uber.com" + href
-        if href in seen_urls:
-            continue
-        seen_urls.add(href)
-        jobs.append({"title": title, "url": href})
-    return jobs
-
-def build_msft_page_url(page_num: int) -> str:
-    parsed = urllib.parse.urlparse(MSFT_BASE)
-    qs = dict(urllib.parse.parse_qsl(parsed.query))
-    qs["pg"] = str(page_num)
-    new_query = urllib.parse.urlencode(qs, doseq=True)
-    return urllib.parse.urlunparse(parsed._replace(query=new_query))
-
-def fetch_msft(page, max_pages: int = 5) -> list[dict]:
-    jobs, seen_urls = [], set()
-    for pg in range(1, max_pages + 1):
-        url = build_msft_page_url(pg)
-        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+# ---------- scraping (lazy import Playwright) ----------
+def fetch_uber_with_playwright() -> list[dict]:
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout  # lazy import
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context(
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0 Safari/537.36")
+        )
+        page = ctx.new_page()
+        page.goto(UBER_URL, wait_until="domcontentloaded", timeout=60_000)
 
         selectors = [
-            "a[href*='/global/en/job/']",
-            "[data-bi-name='job-title'] a[href*='/global/en/job/']",
-            "a.ms-job-card",
+            "a[href*='/careers/list/']",
+            "[data-baseweb='link'] a[href*='/careers/list/']",
         ]
         hydrated = False
         for sel in selectors:
@@ -141,49 +88,48 @@ def fetch_msft(page, max_pages: int = 5) -> list[dict]:
         if not hydrated:
             page.wait_for_timeout(1500)
 
-        # lazy-load scroll
-        for _ in range(6):
+        for _ in range(24):
+            before = page.locator("a[href*='/careers/list/']").count()
             page.keyboard.press("End")
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(700)
+            load_more = page.locator("button:has-text('Load more')")
+            if load_more.count() > 0:
+                try:
+                    load_more.first.click(timeout=3000)
+                    page.wait_for_timeout(1200)
+                except Exception:
+                    pass
+            after = page.locator("a[href*='/careers/list/']").count()
+            if after <= before:
+                break
 
-        anchors = page.locator("a[href*='/global/en/job/']").all()
+        anchors = page.locator("a[href*='/careers/list/']").all()
+        jobs, seen_urls = [], set()
         for a in anchors:
-            href = (a.get_attribute("href") or "").strip()
+            href = a.get_attribute("href") or ""
             title = (a.inner_text() or "").strip()
-            if not href or not title:
+            if not title or "/careers/list/" not in href:
                 continue
             if href.startswith("/"):
-                href = "https://jobs.careers.microsoft.com" + href
-            # normalize URL by dropping query params
-            try:
-                parsed = urllib.parse.urlparse(href)
-                href = urllib.parse.urlunparse(parsed._replace(query=""))
-            except Exception:
-                pass
+                href = "https://www.uber.com" + href
             if href in seen_urls:
                 continue
             seen_urls.add(href)
             jobs.append({"title": title, "url": href})
-    return jobs
 
-# ---------- main ----------
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--test-email", action="store_true", help="Send a test email.")
-    parser.add_argument("--ignore-window", action="store_true", help="Run regardless of 5:00–23:00 PT window.")
-    parser.add_argument("--send-all-now", action="store_true", help="Email ALL current matches once (ignores de-dupe).")
-    parser.add_argument("--msft-pages", type=int, default=5, help="MSFT pages to scan (default 5).")
-    args = parser.parse_args()
+        browser.close()
+        return jobs
 
-    if args.test_email:
-        send_email("[Job Watch] TEST", "SMTP works. Watching Uber + Microsoft for 2026 + (SWE or Graduate).")
-        print("Sent test email.")
+def _msft_page_url(page_num: int) -> str:
+    parsed = urllib.parse.urlparse(MSFT_BASE)
+    qs = dict(urllib.parse.parse_qsl(parsed.query))
+    qs["pg"] = str(page_num)
+    new_query = urllib.parse.urlencode(qs, doseq=True)
+    return urllib.parse.urlunparse(parsed._replace(query=new_query))
 
-    now_pt = datetime.now(TZ)
-    if not args.ignore_window and not in_allowed_window(now_pt):
-        print(f"Outside window (PT): {now_pt}. Skipping.")
-        return
-
+def fetch_msft_with_playwright(max_pages: int = 5) -> list[dict]:
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout  # lazy import
+    jobs, seen_urls = [], set()
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         ctx = browser.new_context(
@@ -192,14 +138,75 @@ def main():
                         "Chrome/124.0 Safari/537.36")
         )
         page = ctx.new_page()
+        for pg in range(1, max_pages + 1):
+            page.goto(_msft_page_url(pg), wait_until="domcontentloaded", timeout=60_000)
 
-        # Fetch both
-        uber_jobs = fetch_uber(page)
-        print(f"[Uber] fetched {len(uber_jobs)} jobs.")
-        msft_jobs = fetch_msft(page, max_pages=args.msft_pages)
-        print(f"[MSFT] fetched {len(msft_jobs)} jobs.")
+            selectors = [
+                "a[href*='/global/en/job/']",
+                "[data-bi-name='job-title'] a[href*='/global/en/job/']",
+                "a.ms-job-card",
+            ]
+            hydrated = False
+            for sel in selectors:
+                try:
+                    page.wait_for_selector(sel, timeout=15_000)
+                    hydrated = True
+                    break
+                except PWTimeout:
+                    continue
+            if not hydrated:
+                page.wait_for_timeout(1500)
 
+            for _ in range(6):
+                page.keyboard.press("End")
+                page.wait_for_timeout(500)
+
+            anchors = page.locator("a[href*='/global/en/job/']").all()
+            for a in anchors:
+                href = (a.get_attribute("href") or "").strip()
+                title = (a.inner_text() or "").strip()
+                if not href or not title:
+                    continue
+                if href.startswith("/"):
+                    href = "https://jobs.careers.microsoft.com" + href
+                # drop query params for de-dupe stability
+                try:
+                    parsed = urllib.parse.urlparse(href)
+                    href = urllib.parse.urlunparse(parsed._replace(query=""))
+                except Exception:
+                    pass
+                if href in seen_urls:
+                    continue
+                seen_urls.add(href)
+                jobs.append({"title": title, "url": href})
         browser.close()
+    return jobs
+
+# ---------- main ----------
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test-email", action="store_true", help="Send a test email and exit.")
+    parser.add_argument("--ignore-window", action="store_true", help="Run regardless of 5:00–23:00 PT window.")
+    parser.add_argument("--send-all-now", action="store_true", help="Email ALL current matches once (ignores de-dupe).")
+    parser.add_argument("--msft-pages", type=int, default=5, help="MSFT pages to scan (default 5).")
+    args = parser.parse_args()
+
+    # FAST PATH: test email should not load Playwright at all
+    if args.test_email:
+        send_email("[Job Watch] TEST", "SMTP works. Watching Uber + Microsoft for 2026 + (SWE or Graduate).")
+        print("Sent test email.")
+        return
+
+    now_pt = datetime.now(TZ)
+    if not args.ignore_window and not in_allowed_window(now_pt):
+        print(f"Outside window (PT): {now_pt}. Skipping.")
+        return
+
+    # Scrape (Playwright is imported lazily inside these functions)
+    uber_jobs = fetch_uber_with_playwright()
+    print(f"[Uber] fetched {len(uber_jobs)} jobs.")
+    msft_jobs = fetch_msft_with_playwright(max_pages=args.msft_pages)
+    print(f"[MSFT] fetched {len(msft_jobs)} jobs.")
 
     # Filter
     uber_matches = [j for j in uber_jobs if matches_target(j["title"])]
@@ -225,7 +232,7 @@ def main():
     if send_uber:
         lines.append("Uber Jobs:")
         lines.extend([f"- {j['title']}\n  {j['url']}" for j in send_uber])
-        lines.append("")  # blank line
+        lines.append("")
     if send_msft:
         lines.append("Microsoft Jobs:")
         lines.extend([f"- {j['title']}\n  {j['url']}" for j in send_msft])
