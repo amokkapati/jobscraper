@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Optional: extra system deps if Playwright complains in your runner
+      # Optional: extra system deps if Playwright ever complains
       # - name: Apt deps
       #   run: sudo apt-get update && sudo apt-get install -y libnss3 libxkbcommon0 libgtk-3-0 libdrm2
 
@@ -26,26 +26,26 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      # Regular scheduled run (cron) – unchanged
+      # Scheduled run – respects 5:00–23:00 PT gate in script, de-duped emails
       - name: Run watcher (regular)
         if: ${{ github.event_name != 'workflow_dispatch' }}
         env:
-        SMTP_HOST: ${{ secrets.SMTP_HOST }}
-        SMTP_PORT: ${{ secrets.SMTP_PORT }}
-        SMTP_USER: ${{ secrets.SMTP_USER }}
-        SMTP_PASS: ${{ secrets.SMTP_PASS }}
-        TO_EMAIL: ${{ secrets.TO_EMAIL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
         run: python watch_uber.py
 
-        # Manual run – send a guaranteed TEST email, then force a scrape
-      - name: Run watcher (manual test)
+      # Manual run – guaranteed test email, then force a scrape + full dump once
+      - name: Run watcher (manual test + dump)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
-        SMTP_HOST: ${{ secrets.SMTP_HOST }}
-        SMTP_PORT: ${{ secrets.SMTP_PORT }}
-        SMTP_USER: ${{ secrets.SMTP_USER }}
-        SMTP_PASS: ${{ secrets.SMTP_PASS }}
-        TO_EMAIL: ${{ secrets.TO_EMAIL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
         run: |
           python watch_uber.py --test-email
-          python watch_uber.py --ignore-window
+          python watch_uber.py --ignore-window --send-all-now
