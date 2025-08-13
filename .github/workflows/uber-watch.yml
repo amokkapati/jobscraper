@@ -2,7 +2,7 @@ name: Uber Watch
 
 on:
   schedule:
-    - cron: "*/30 * * * *" # every 30 minutes, UTC
+    - cron: "*/30 * * * *" # every 30 minutes (UTC)
   workflow_dispatch: {}
 
 jobs:
@@ -17,16 +17,35 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Optional: extra system deps if Playwright complains in your runner
+      # - name: Apt deps
+      #   run: sudo apt-get update && sudo apt-get install -y libnss3 libxkbcommon0 libgtk-3-0 libdrm2
+
       - name: Install deps
         run: |
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Run watcher
+      # Regular scheduled run — respects 5:00–23:00 PT gate in the script
+      - name: Run watcher (regular)
+        if: ${{ github.event_name != 'workflow_dispatch' }}
         env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }} # optional, defaults to Gmail
-          SMTP_PORT: ${{ secrets.SMTP_PORT }} # optional, defaults to 465
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
         run: python watch_uber.py
+
+      # Manual run: send a test email first, then force a scrape even outside window
+      - name: Run watcher (manual test)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
+        run: |
+          python watch_uber.py --test-email
+          python watch_uber.py --ignore-window
