@@ -28,7 +28,7 @@ jobs:
         if: ${{ github.event_name != 'workflow_dispatch' }}
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }} # e.g. smtp.gmail.com
-          SMTP_PORT: ${{ secrets.SMTP_PORT }} # e.g. 465 (or leave blank; code defaults)
+          SMTP_PORT: ${{ secrets.SMTP_PORT }} # e.g. 465 (blank okay; code defaults)
           SMTP_USER: ${{ secrets.SMTP_USER }} # your Gmail
           SMTP_PASS: ${{ secrets.SMTP_PASS }} # app password
           TO_EMAIL: ${{ secrets.TO_EMAIL }} # destination inbox
