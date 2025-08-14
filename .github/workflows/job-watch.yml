@@ -3,17 +3,15 @@ name: Job Watch (Uber + Microsoft)
 on:
   schedule:
     - cron: "*/30 * * * *" # every 30 minutes (UTC)
-  workflow_dispatch: {} # manual runs
+  workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -22,7 +20,7 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      # Scheduled run – normal monitoring (time window + de-dupe)
+      # scheduled run (normal behavior)
       - name: Watch (scheduled)
         if: ${{ github.event_name != 'workflow_dispatch' }}
         env:
@@ -34,7 +32,7 @@ jobs:
         run: |
           python watch_all.py
 
-      # Manual run – test + one-time full dump for BOTH in ONE email
+      # manual run (quick verification incl. MSFT test filter)
       - name: Watch (manual test + dump)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
@@ -45,4 +43,4 @@ jobs:
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
         run: |
           python watch_all.py --test-email
-          python watch_all.py --ignore-window --send-all-now --msft-pages=5
+          python watch_all.py --ignore-window --send-all-now --msft-test-se
