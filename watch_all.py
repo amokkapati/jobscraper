@@ -1,4 +1,4 @@
-import os, json, smtplib, argparse, ssl, sys, urllib.parse
+import os, json, smtplib, argparse, ssl, sys, re, urllib.parse
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, time as dtime
@@ -8,10 +8,9 @@ from pathlib import Path
 # ------------ config ------------
 TZ = ZoneInfo("America/Los_Angeles")
 
-# Uber: university roles page; we’ll expand via “Load more”
 UBER_URL = "https://www.uber.com/us/en/careers/list/?department=University"
 
-# Microsoft: “Recent” ordering. We’ll page with ?pg=1..N
+# Microsoft search base (Recent)
 MSFT_BASE = (
     "https://jobs.careers.microsoft.com/global/en/search"
     "?q=software%20engineer&exp=Students%20and%20graduates"
@@ -20,6 +19,10 @@ MSFT_BASE = (
 
 SEEN_UBER = Path("seen_uber.json")
 SEEN_MSFT = Path("seen_msft.json")
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/124.0 Safari/537.36")
 
 # ------------ helpers ------------
 def in_allowed_window(now_pt: datetime) -> bool:
@@ -71,14 +74,10 @@ def send_email(subject: str, body: str):
 
 # ------------ scraping (lazy Playwright) ------------
 def fetch_uber_with_playwright() -> list[dict]:
-    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout  # lazy import
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0 Safari/537.36")
-        )
+        ctx = browser.new_context(user_agent=UA)
         page = ctx.new_page()
         page.goto(UBER_URL, wait_until="domcontentloaded", timeout=60_000)
 
@@ -91,7 +90,7 @@ def fetch_uber_with_playwright() -> list[dict]:
             except PWTimeout:
                 continue
 
-        # try to expand a bit
+        # expand a bit
         for _ in range(16):
             before = page.locator("a[href*='/careers/list/']").count()
             page.keyboard.press("End")
@@ -131,56 +130,115 @@ def _msft_page_url(page_num: int) -> str:
     new_query = urllib.parse.urlencode(qs, doseq=True)
     return urllib.parse.urlunparse(parsed._replace(query=new_query))
 
+def _msft_collect_links_dom(page) -> list[dict]:
+    """
+    DOM sweep using evaluate() – tends to be more robust if locators miss.
+    """
+    links = page.evaluate("""() => {
+        const out = [];
+        const as = Array.from(document.querySelectorAll('a[href*="/global/en/job/"]'));
+        for (const a of as) {
+            const href = a.href || '';
+            const title = (a.textContent || '').trim();
+            if (href) out.push({href, title});
+        }
+        return out;
+    }""")
+    # normalize + dedupe
+    seen, jobs = set(), []
+    for item in links or []:
+        href = item.get("href", "").strip()
+        title = (item.get("title") or item.get("text") or item.get("label") or item.get("ariaLabel") or item.get("title") or item.get("titleText") or item.get("Title") or item.get("title_text") or item.get("TITLE") or item.get("TitleText") or item.get("titleText") or item.get("title_text") or item.get("textContent") or item.get("innerText") or item.get("title") or item.get("alt") or item.get("aria-label") or item.get("titleAttr") or item.get("title_attr") or item.get("TitleAttr") or "").strip()
+        # prefer a.textContent captured as 'title' above
+        if not title:
+            title = (item.get("title") or "").strip()
+        if href.startswith("/"):
+            href = "https://jobs.careers.microsoft.com" + href
+        try:
+            parsed = urllib.parse.urlparse(href)
+            href = urllib.parse.urlunparse(parsed._replace(query=""))
+        except Exception:
+            pass
+        key = href
+        if href and key not in seen:
+            seen.add(key)
+            jobs.append({"title": title, "url": href})
+    return jobs
+
+def _msft_collect_links_nextdata(page) -> list[dict]:
+    """
+    Fallback: parse __NEXT_DATA__ JSON blob and regex out job URLs + nearby titles.
+    We don't rely on schema; we just scan the text for job links, then try to map titles.
+    """
+    raw = page.evaluate("""() => {
+        const s = document.querySelector('#__NEXT_DATA__');
+        return s ? s.textContent : null;
+    }""")
+    if not raw:
+        return []
+    jobs, seen = [], set()
+    # find URLs
+    for m in re.finditer(r'"/global/en/job/[^"\\]+"\s*', raw):
+        path = m.group(0).strip('" ').rstrip()
+        try:
+            url = "https://jobs.careers.microsoft.com" + path.strip('"')
+        except Exception:
+            continue
+        # find a nearby "title":"..." before or after
+        window_start = max(0, m.start() - 400)
+        window_end = min(len(raw), m.end() + 400)
+        window = raw[window_start:window_end]
+        title_match = re.search(r'"title"\s*:\s*"([^"]+)"', window, flags=re.IGNORECASE)
+        title = title_match.group(1).strip() if title_match else ""
+        try:
+            parsed = urllib.parse.urlparse(url)
+            url = urllib.parse.urlunparse(parsed._replace(query=""))
+        except Exception:
+            pass
+        if url not in seen:
+            seen.add(url)
+            jobs.append({"title": title, "url": url})
+    return jobs
+
 def fetch_msft_with_playwright(pages: int = 1) -> list[dict]:
-    """Fetch Microsoft results for given number of pages (Recent order)."""
-    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout  # lazy import
+    """
+    Robust fetch for Microsoft:
+    - go to pg=1..pages (Recent)
+    - wait for 'networkidle'
+    - scroll a bit
+    - try DOM evaluate() to collect anchors
+    - if empty, fall back to __NEXT_DATA__ scan
+    """
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
     jobs, seen_urls = [], set()
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0 Safari/537.36")
-        )
+        ctx = browser.new_context(user_agent=UA)
         page = ctx.new_page()
         for pg in range(1, max(1, pages) + 1):
             url = _msft_page_url(pg)
             page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            # extra waits for hydration / lazy network
+            try:
+                page.wait_for_load_state("networkidle", timeout=10_000)
+            except PWTimeout:
+                pass
+            for _ in range(4):
+                page.keyboard.press("End")
+                page.wait_for_timeout(400)
 
-            # permissive selectors
-            selectors = [
-                "a[href*='/global/en/job/']",
-                "[data-bi-name='job-title'] a[href*='/global/en/job/']",
-                "a.ms-job-card",
-            ]
-            hydrated = False
-            for sel in selectors:
-                try:
-                    page.wait_for_selector(sel, timeout=10_000)
-                    hydrated = True
-                    break
-                except PWTimeout:
-                    continue
-            if not hydrated:
-                continue
+            # try DOM sweep
+            dom_jobs = _msft_collect_links_dom(page)
 
-            # grab all visible job links on this page
-            anchors = page.locator("a[href*='/global/en/job/']")
-            count = anchors.count()
-            for i in range(count):
-                a = anchors.nth(i)
-                href = (a.get_attribute("href") or "").strip()
-                title = (a.inner_text() or "").strip()
-                if not href or not title:
+            if not dom_jobs:
+                # fallback to __NEXT_DATA__ parse
+                dom_jobs = _msft_collect_links_nextdata(page)
+
+            for j in dom_jobs:
+                href = j.get("url", "").strip()
+                title = (j.get("title") or "").strip()
+                if not href:
                     continue
-                if href.startswith("/"):
-                    href = "https://jobs.careers.microsoft.com" + href
-                # normalize (drop query)
-                try:
-                    parsed = urllib.parse.urlparse(href)
-                    href = urllib.parse.urlunparse(parsed._replace(query=""))
-                except Exception:
-                    pass
                 if href in seen_urls:
                     continue
                 seen_urls.add(href)
@@ -201,7 +259,7 @@ def main():
                         help="How many Microsoft pages to fetch (default: 1).")
     args = parser.parse_args()
 
-    # Fast SMTP test path (no Playwright)
+    # Fast SMTP test (no Playwright)
     if args.test_email:
         send_email("[Job Watch] TEST", "SMTP works. Watching Uber + Microsoft.")
         print("Test email sent.")
