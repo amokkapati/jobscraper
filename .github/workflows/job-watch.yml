@@ -1,4 +1,4 @@
-name: Job Watch (Uber + Microsoft)
+name: Job Watch (Uber)
 
 on:
   schedule:
@@ -20,7 +20,14 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      # scheduled run (normal behavior)
+      # restore seen_uber.json so duplicates are avoided
+      - name: Cache seen file
+        uses: actions/cache@v4
+        with:
+          path: seen_uber.json
+          key: seen-uber
+
+      # scheduled run
       - name: Watch (scheduled)
         if: ${{ github.event_name != 'workflow_dispatch' }}
         env:
@@ -30,10 +37,10 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
         run: |
-          python watch_all.py
+          python watch_uber.py
 
-      # manual run (quick verification incl. MSFT test filter)
-      - name: Watch (manual test + dump)
+      # manual run
+      - name: Watch (manual test)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -42,5 +49,5 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
         run: |
-          python watch_all.py --test-email
-          python watch_all.py --ignore-window --send-all-now --msft-test-se
+          python watch_uber.py --test-email
+          python watch_uber.py --ignore-window --send-all-now
