@@ -20,15 +20,22 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      # Restore seen file (so we don't send duplicates)
-      - name: Restore seen file
-        id: cache-seen
-        uses: actions/cache@v4
+      # Download last run's seen file (if exists)
+      - name: Download seen file
+        uses: actions/download-artifact@v4
         with:
-          path: seen_uber.json
-          key: seen-uber
+          name: seen-file
+          path: .
+        continue-on-error: true
 
-      # Scheduled run (normal behavior)
+      # Ensure seen_uber.json exists (create empty if missing)
+      - name: Ensure seen file exists
+        run: |
+          if [ ! -f seen_uber.json ]; then
+            echo "[]" > seen_uber.json
+          fi
+
+      # Scheduled run
       - name: Watch (scheduled)
         if: ${{ github.event_name != 'workflow_dispatch' }}
         run: python watch_uber.py
@@ -52,10 +59,10 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
 
-      # Save updated seen file so next run has history
-      - name: Save updated seen file
+      # Upload updated seen file so it persists to next run
+      - name: Upload seen file
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/upload-artifact@v4
         with:
+          name: seen-file
           path: seen_uber.json
-          key: seen-uber
