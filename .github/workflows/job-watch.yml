@@ -20,34 +20,42 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      # restore seen_uber.json so duplicates are avoided
-      - name: Cache seen file
+      # Restore seen file (so we don't send duplicates)
+      - name: Restore seen file
+        id: cache-seen
         uses: actions/cache@v4
         with:
           path: seen_uber.json
           key: seen-uber
 
-      # scheduled run
+      # Scheduled run (normal behavior)
       - name: Watch (scheduled)
         if: ${{ github.event_name != 'workflow_dispatch' }}
+        run: python watch_uber.py
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
-        run: |
-          python watch_uber.py
 
-      # manual run
+      # Manual run (for testing)
       - name: Watch (manual test)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          TO_EMAIL: ${{ secrets.TO_EMAIL }}
         run: |
           python watch_uber.py --test-email
           python watch_uber.py --ignore-window --send-all-now
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
+
+      # Save updated seen file so next run has history
+      - name: Save updated seen file
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: seen_uber.json
+          key: seen-uber
