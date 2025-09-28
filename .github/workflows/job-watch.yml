@@ -8,6 +8,8 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # allow pushing back to the repo
     steps:
       - uses: actions/checkout@v4
 
@@ -20,49 +22,21 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      # Download last run's seen file (if exists)
-      - name: Download seen file
-        uses: actions/download-artifact@v4
-        with:
-          name: seen-file
-          path: .
-        continue-on-error: true
-
-      # Ensure seen_uber.json exists (create empty if missing)
-      - name: Ensure seen file exists
-        run: |
-          if [ ! -f seen_uber.json ]; then
-            echo "[]" > seen_uber.json
-          fi
-
-      # Scheduled run
-      - name: Watch (scheduled)
-        if: ${{ github.event_name != 'workflow_dispatch' }}
+      - name: Run job watcher
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
         run: python watch_uber.py
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          TO_EMAIL: ${{ secrets.TO_EMAIL }}
 
-      # Manual run (for testing)
-      - name: Watch (manual test)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+      - name: Commit updated seen file
         run: |
-          python watch_uber.py --test-email
-          python watch_uber.py --ignore-window --send-all-now
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          TO_EMAIL: ${{ secrets.TO_EMAIL }}
-
-      # Upload updated seen file so it persists to next run
-      - name: Upload seen file
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: seen-file
-          path: seen_uber.json
+          if [ -f seen_uber.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add seen_uber.json
+            git commit -m "Update seen_uber.json [skip ci]" || echo "No changes to commit"
+            git push
+          fi
