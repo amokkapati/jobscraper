@@ -1,10 +1,5 @@
 name: Job Watch (Uber)
 
-on:
-  schedule:
-    - cron: "*/30 * * * *" # every 30 minutes (UTC)
-  workflow_dispatch: {}
-
 jobs:
   run:
     runs-on: ubuntu-latest
